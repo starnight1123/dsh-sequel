@@ -34,6 +34,17 @@ const MAX_TOKEN_CAP = 65536
 /** 未显式配置时的最低输出预算，比原默认 8192 大幅提高。 */
 const DEFAULT_MAX_TOKENS = 16384
 
+/** 续写模式：prose=普通叙述续写，dialogue=对话体/聊天体。 */
+type ContinueMode = 'prose' | 'dialogue'
+
+/** 对话体专用系统提示：更紧凑，减少无关输出。 */
+const DIALOGUE_SYSTEM_PROMPT = [
+  '你是一个对话体写作引擎。',
+  '输出格式：角色名：台词；动作/心理/环境用（）或【】标注。',
+  '不要输出大段旁白，不要解释，不要复述设定，直接开始对话。',
+  '严格保持人物性格、关系与世界观设定。',
+].join('\n')
+
 export interface Config {
   /** 默认 provider；缺省时尝试使用当前 agent 的请求路由。 */
   provider?: string
@@ -69,8 +80,13 @@ interface ImportJsonArgs {
 }
 
 interface ContinueArgs {
+  mode?: string
   story?: string
   story_path?: string
+  worldview?: string
+  worldview_path?: string
+  characters?: string
+  characters_path?: string
   role?: string
   preset?: string
   preset_path?: string
@@ -94,7 +110,7 @@ export function apply(ctx: Context, config: Config): void {
   // ── 工具 1：导入 TXT 正文 ──────────────────────────────────────────────
   ctx.effect(() => ctx.tools.register(defineTool({
     name: 'dsh_sequel_import_txt',
-    description: '导入并规整 TXT 正文，返回正文统计与预览。',
+    description: '可选：规整/统计 TXT 正文；续写可直接传 story/story_path，不必先调用本工具。',
     parameters: {
       content: { type: 'string', required: true, description: 'TXT 正文内容。' },
       title: { type: 'string', description: '可选的正文标题/来源名。' },
@@ -137,7 +153,7 @@ export function apply(ctx: Context, config: Config): void {
   // ── 工具 2：导入 JSON 角色/预设 ────────────────────────────────────────
   ctx.effect(() => ctx.tools.register(defineTool({
     name: 'dsh_sequel_import_json',
-    description: '导入并校验 JSON 角色卡或预设，返回类型与字段摘要。',
+    description: '可选：校验 JSON 角色/预设；续写可直接传 role/preset/preset_path，不必先调用本工具。',
     parameters: {
       content: { type: 'string', required: true, description: 'JSON 字符串（角色卡或预设）。' },
       label: { type: 'string', description: '可选的来源标签。' },
@@ -186,10 +202,15 @@ export function apply(ctx: Context, config: Config): void {
   // ── 工具 3：生成续写 ───────────────────────────────────────────────────
   ctx.effect(() => ctx.tools.register(defineTool({
     name: 'dsh_sequel_continue',
-    description: '根据 TXT 正文与 JSON 角色/预设生成符合设定的续写内容。',
+    description: '根据正文/世界观/人物与 JSON 角色预设生成续写，支持普通叙述与对话体。',
     parameters: {
-      story: { type: 'string', description: '已有正文（TXT 内容），与 story_path 二选一。' },
+      mode: { type: 'string', enum: ['prose', 'dialogue'], description: '输出模式：prose=普通叙述（默认），dialogue=对话体/聊天体。' },
+      story: { type: 'string', description: '已有正文/最近剧情（TXT 内容），与 story_path 二选一；对话体可省略。' },
       story_path: { type: 'string', description: 'TXT 文件路径，插件会直接读取该文件作为正文；与 story 二选一。' },
+      worldview: { type: 'string', description: '世界观/背景设定文本，可省略。' },
+      worldview_path: { type: 'string', description: '世界观 TXT 文件路径；与 worldview 二选一。' },
+      characters: { type: 'string', description: '人物信息文本，可省略。' },
+      characters_path: { type: 'string', description: '人物信息 TXT 文件路径；与 characters 二选一。' },
       role: { type: 'string', description: 'JSON 角色卡字符串，可省略。' },
       preset: { type: 'string', description: 'JSON 预设/风格字符串，可省略。' },
       preset_path: { type: 'string', description: 'JSON 预设文件路径，插件会读取该文件作为预设；与 preset 二选一。' },
@@ -230,6 +251,7 @@ export function apply(ctx: Context, config: Config): void {
       },
     },
     async execute(args: ContinueArgs, exec: ToolRunContext) {
+      const mode = normalizeMode(args.mode)
       let story = ''
       if (args.story_path && args.story_path.trim().length > 0) {
         if (args.story && args.story.trim().length > 0) {
@@ -239,8 +261,26 @@ export function apply(ctx: Context, config: Config): void {
       } else {
         story = args.story ?? ''
       }
-      if (!story || story.trim().length === 0) {
-        throw new Error('story 或 story_path 不能为空')
+      if (mode === 'prose' && (!story || story.trim().length === 0)) {
+        throw new Error('prose 模式需要 story 或 story_path')
+      }
+      if (args.insert_after && args.insert_after.trim().length > 0 && (!story || story.trim().length === 0)) {
+        throw new Error('insert_after 需要 story 或 story_path')
+      }
+
+      let worldview = args.worldview ?? ''
+      if (args.worldview_path && args.worldview_path.trim().length > 0) {
+        if (worldview.trim().length > 0) {
+          throw new Error('worldview 和 worldview_path 只能提供一个')
+        }
+        worldview = await readTextFile(ctx, args.worldview_path.trim(), exec.signal)
+      }
+      let characters = args.characters ?? ''
+      if (args.characters_path && args.characters_path.trim().length > 0) {
+        if (characters.trim().length > 0) {
+          throw new Error('characters 和 characters_path 只能提供一个')
+        }
+        characters = await readTextFile(ctx, args.characters_path.trim(), exec.signal)
       }
       let preset = args.preset ?? ''
       if (args.preset_path && args.preset_path.trim().length > 0) {
@@ -256,8 +296,10 @@ export function apply(ctx: Context, config: Config): void {
       const maxTokens = resolveMaxTokens(args, config, route, length)
       const temperature = route.temperature ?? config.temperature ?? 0.9
       const style = analyzeStyle(story)
-      const insertion = resolveInsertion(story, args.insert_after)
-      const prompt = buildContinuationPrompt({ ...args, story, preset }, config, length, style, insertion)
+      const insertion = story ? resolveInsertion(story, args.insert_after) : undefined
+      const promptArgs = { ...args, story, worldview, characters, preset, mode }
+      const prompt = buildContinuationPrompt(promptArgs, config, length, style, insertion)
+      const system = mode === 'dialogue' ? DIALOGUE_SYSTEM_PROMPT : CONTINUE_SYSTEM_PROMPT
       const messages: Message[] = [
         createUserMessage({
           content: [{ type: 'text', text: prompt }],
@@ -268,7 +310,7 @@ export function apply(ctx: Context, config: Config): void {
         provider: route.provider,
         model: route.model,
         messages,
-        system: CONTINUE_SYSTEM_PROMPT,
+        system,
         maxTokens,
         temperature,
         signal: exec.signal,
@@ -363,22 +405,51 @@ interface InsertionPoint {
   prefix: string
 }
 
+/** 规范化输出模式，支持中英文别名。 */
+function normalizeMode(mode?: string): ContinueMode {
+  if (!mode || mode.trim().length === 0) return 'prose'
+  const value = mode.trim().toLowerCase()
+  if (value === 'prose' || value === 'narrative' || value === '文' || value === '叙述') return 'prose'
+  if (value === 'dialogue' || value === 'chat' || value === '对话' || value === '聊天') return 'dialogue'
+  throw new Error(`未知 mode：${mode}（支持 prose / dialogue）`)
+}
+
 /** 组装续写提示词。 */
 function buildContinuationPrompt(
-  args: ContinueArgs & { story: string },
+  args: ContinueArgs & { story: string; mode: ContinueMode; worldview: string; characters: string; preset: string },
   config: Config,
   length: number,
   style: StyleProfile,
   insertion?: InsertionPoint,
 ): string {
   const parts: string[] = [
-    '你是一个小说续写引擎。你的核心任务是严格模仿原文文风，从指定位置继续写作。',
-    '',
-    '## 原文文风（必须严格模仿）',
-    ...formatStyleProfile(style),
-    '规则：完全沿用原文的用词、句式、标点、节奏、人称与叙事视角；禁止擅自切换成古风、文言、翻译腔或任何与原文不一致的风格。',
+    args.mode === 'dialogue'
+      ? '你是一个对话体写作引擎。严格按设定与格式输出，不要解释。'
+      : '你是一个小说续写引擎。你的核心任务是严格模仿原文文风，从指定位置继续写作。',
     '',
   ]
+  if (args.mode === 'dialogue') {
+    parts.push(
+      '## 文风要求',
+      ...formatStyleProfile(style).slice(0, 3),
+      '保持口语化、自然，不要书面腔。',
+      '',
+    )
+  } else {
+    parts.push(
+      '## 原文文风（必须严格模仿）',
+      ...formatStyleProfile(style),
+      '规则：完全沿用原文的用词、句式、标点、节奏、人称与叙事视角；禁止擅自切换成古风、文言、翻译腔或任何与原文不一致的风格。',
+      '',
+    )
+  }
+
+  if (args.worldview && args.worldview.trim().length > 0) {
+    parts.push('## 世界观/背景设定', args.worldview.trim(), '')
+  }
+  if (args.characters && args.characters.trim().length > 0) {
+    parts.push('## 人物信息', args.characters.trim(), '')
+  }
   if (args.role && args.role.trim().length > 0) {
     parts.push('## 角色设定（JSON）', args.role.trim(), '')
   }
@@ -389,18 +460,36 @@ function buildContinuationPrompt(
     parts.push('## 用户文风要求', args.style_hint.trim(), '')
   }
 
-  const storyForPrompt = insertion ? insertion.prefix.trim() : args.story.trim()
-  parts.push('## 正文' + (insertion ? '（截至插入点）' : ''), storyForPrompt, '')
+  if (args.story && args.story.trim().length > 0) {
+    const storyForPrompt = insertion ? insertion.prefix.trim() : args.story.trim()
+    parts.push('## 正文/最近剧情' + (insertion ? '（截至插入点）' : ''), storyForPrompt, '')
+  } else if (args.mode === 'dialogue') {
+    parts.push('## 正文/最近剧情', '（无既有正文，直接开始新对话）', '')
+  }
 
   if (insertion) {
     parts.push('## 插入点', `上文结尾的片段是：“${insertion.marker.trim()}”`, '请从该片段之后继续，不要重复插入点之前的内容。', '')
+  } else if (args.mode === 'dialogue') {
+    parts.push(
+      '## 输出格式（对话体）',
+      '- 每行格式：角色名：台词',
+      '- 动作/心理/环境用（）或【】括起来',
+      '- 不要输出大段旁白，不要解释，不要复述设定',
+      '- 直接开始对话',
+      '',
+    )
   } else {
     parts.push('## 续写起点', '请从正文结尾处继续。', '')
   }
 
   const instruction = args.instruction?.trim() || config.defaultInstruction?.trim() || ''
-  parts.push('## 续写要求', instruction || '请自然续写。', `期望长度：约 ${length} 个字符。`, '')
-  parts.push('请只输出续写正文。')
+  parts.push(
+    '## 续写要求',
+    instruction || (args.mode === 'dialogue' ? '请自然开始一段对话。' : '请自然续写。'),
+    `期望长度：约 ${length} 个字符。`,
+    '',
+  )
+  parts.push(args.mode === 'dialogue' ? '请只输出对话内容。' : '请只输出续写正文。')
   return parts.join('\n')
 }
 

@@ -1,30 +1,66 @@
 # @dsh-external/dsh-sequel
 
-能导入 TXT 正文与 JSON 角色/预设，生成符合设定的续写内容。
+能导入 TXT 正文/世界观/人物信息与 JSON 角色/预设，生成符合设定的续写内容，支持普通叙述与对话体。
 
 ## 工具
 
 | 工具名 | 说明 |
 | --- | --- |
-| `dsh_sequel_import_txt` | 导入并规整 TXT 正文，返回字符数、行数与预览。 |
-| `dsh_sequel_import_json` | 导入并校验 JSON 角色卡或预设，返回类型（character/preset/unknown）与字段摘要。 |
-| `dsh_sequel_continue` | 根据正文 + 角色/预设生成续写内容，支持自定义指令、长度、插入点、文风约束和 provider/model 覆盖。 |
+| `dsh_sequel_import_txt` | 可选：规整/统计 TXT 正文；续写可直接传 `story` / `story_path`，不必先调用。 |
+| `dsh_sequel_import_json` | 可选：校验 JSON 角色/预设；续写可直接传 `role` / `preset` / `preset_path`，不必先调用。 |
+| `dsh_sequel_continue` | 核心工具：根据正文/世界观/人物 + 角色/预设生成续写，支持 `prose` 和 `dialogue` 两种模式。 |
 
 ## `dsh_sequel_continue` 参数
 
 | 参数 | 是否必填 | 说明 |
 | --- | --- | --- |
-| `story` | 二选一 | 已有 TXT 正文 |
-| `story_path` | 二选一 | TXT 文件路径，插件会直接读取该文件作为正文 |
+| `mode` | 可选 | `prose`=普通叙述（默认），`dialogue`=对话体/聊天体 |
+| `story` | 二选一* | 已有正文/最近剧情（TXT 内容）；对话体可省略 |
+| `story_path` | 二选一* | TXT 文件路径，插件会直接读取该文件作为正文 |
+| `worldview` | 可选 | 世界观/背景设定文本 |
+| `worldview_path` | 可选 | 世界观 TXT 文件路径；与 `worldview` 二选一 |
+| `characters` | 可选 | 人物信息文本 |
+| `characters_path` | 可选 | 人物信息 TXT 文件路径；与 `characters` 二选一 |
 | `role` | 可选 | JSON 角色卡字符串 |
 | `preset` | 可选 | JSON 预设/风格字符串 |
-| `preset_path` | 可选 | JSON 预设文件路径，插件会读取该文件作为预设；与 `preset` 二选一 |
+| `preset_path` | 可选 | JSON 预设文件路径；与 `preset` 二选一 |
 | `instruction` | 可选 | 额外续写要求 |
 | `length` | 可选 | 期望续写字符数，默认 500 |
-| `insert_after` | 可选 | 插入点：正文中出现的片段/句子，插件会自动定位到该处并从此之后续写 |
+| `insert_after` | 可选 | 插入点：正文中出现的片段/句子，从此处之后续写 |
 | `style_hint` | 可选 | 额外指定文风要求，覆盖自动文风分析 |
 | `max_tokens` | 可选 | 本次续写的最大输出 token 数，最高 65536 |
 | `provider` / `model` | 可选 | 覆盖 LLM 路由 |
+
+\* `story` / `story_path` 在 `prose` 模式下必填；在 `dialogue` 模式下可省略，直接开始新对话。
+
+## 对话体模式
+
+想写“线上对话/聊天体”时，设置 `mode: dialogue`，并提供世界观、人物信息或角色 JSON：
+
+```text
+请调用 dsh_sequel_continue：
+- mode：dialogue
+- worldview_path：G:\ds专用\世界观.txt
+- characters_path：G:\ds专用\人物信息.txt
+- role：{"name":"林晚","personality":"清冷、外柔内刚"}
+- preset_path：G:\ds专用\dsh-sequel\preset.example.json
+- instruction：写一段她与同事在深夜加班的对话，语气自然。
+- length：800
+```
+
+对话体输出格式：
+
+```text
+林晚：你还没走？
+同事：（抬头看了一眼）等你一起。
+林晚：……不必了，我习惯一个人。
+```
+
+规则：
+
+- 每行格式：`角色名：台词`
+- 动作/心理/环境用 `（）` 或 `【】` 括起来
+- 不输出大段旁白，不解释，不重复设定
 
 ## 文风遵循
 
@@ -36,7 +72,8 @@
 - 句式：短句 / 中等 / 长句
 - 语气：情绪、对话、留白等特征
 
-提示中会明确要求：**完全沿用原文用词、句式、标点、节奏、人称与叙事视角，禁止擅自切换成古风、文言或翻译腔**。如果你发现风格仍不对，可以通过 `style_hint` 强制指定。
+普通叙述模式会严格要求：**完全沿用原文用词、句式、标点、节奏、人称与叙事视角，禁止擅自切换成古风、文言或翻译腔**。  
+对话体模式会精简文风分析，只保留关键约束，减少 token 消耗。
 
 ## 插入点示例
 
@@ -56,14 +93,15 @@
 
 ```text
 请调用 dsh_sequel_continue：
-- story_path：G:\ds专用\soushu2025.com@《关于我想把共享单车们上锁这件事（我的淫荡女友们）》1-11 番外5 作者：喵内[搜书吧].txt
+- story_path：G:\ds专用\你的小说.txt
 - insert_after：她盯着屏幕，手开始发抖。
 - instruction：从插入点之后续写 800 字。
 ```
 
 注意：
 
-- `story` 和 `story_path` **只能填一个**，不能同时填。
+- `story` 和 `story_path` **只能填一个**。
+- `worldview` / `worldview_path`、`characters` / `characters_path`、`preset` / `preset_path` 同理，各自二选一。
 - 文件读取走 DSH 的 `fs` 服务，受当前沙箱权限约束。
 - 读取的是 UTF-8 文本文件。
 
@@ -113,6 +151,22 @@
 - 如果两者都没填，但配置了 `presetPath`，会自动加载该文件。
 - 预设 JSON 内容会原样进入续写提示，因此请只放入你确认合规的风格规则。
 
+## Token 优化说明
+
+本次优化重点：
+
+- 对话体使用更短的 system prompt 和精简文风分析，减少无关输出。
+- 工具描述已标注为“可选”，避免 Agent 为了导入而额外多跑一轮工具调用。
+- `insert_after` 会把正文截断到插入点，减少送入模型的冗余历史。
+- 无正文的对话体可以直接开始，不再强制要求贴整段 story。
+
+Token 上限：
+
+- 默认最低输出预算：**16384 tokens**
+- 最高允许：**65536 tokens**
+- 单次调用可用 `max_tokens` 直接指定，例如 `max_tokens: 32768`
+- 也可以在插件配置里用 `maxTokens` 统一调高
+
 ## 配置
 
 插件支持以下可选配置：
@@ -123,19 +177,12 @@
   "model": "deepseek-v4-pro",
   "maxTokens": 32768,
   "temperature": 0.9,
-  "defaultInstruction": "请严格模仿原文文风自然续写，保持人称、语气和叙事连贯。"
+  "defaultInstruction": "请严格模仿原文文风自然续写，保持人称、语气和叙事连贯。",
+  "presetPath": "G:\\ds专用\\dsh-sequel\\preset.example.json"
 }
 ```
 
 `provider` / `model` 未配置时，`dsh_sequel_continue` 会尝试使用当前 agent 的请求路由；也可以直接在工具参数中传入 `provider` / `model` 覆盖。
-
-### Token 上限
-
-- 默认最低输出预算：**16384 tokens**
-- 最高允许：**65536 tokens**
-- 单次调用可用 `max_tokens` 直接指定，例如 `max_tokens: 32768`
-- 也可以在插件配置里用 `maxTokens` 统一调高
-- 路由自带的低 `maxTokens` 不会再压死续写长度
 
 ## 构建与注入
 
