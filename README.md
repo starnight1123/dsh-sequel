@@ -155,14 +155,27 @@
 
 本次优化重点：
 
-- 对话体使用更短的 system prompt 和精简文风分析，减少无关输出。
-- 工具描述已标注为“可选”，避免 Agent 为了导入而额外多跑一轮工具调用。
-- `insert_after` 会把正文截断到插入点，减少送入模型的冗余历史。
-- 无正文的对话体可以直接开始，不再强制要求贴整段 story。
+- **自动模式识别**：正文明显是“角色名：台词”结构时，自动切成对话体，不用手动传 `mode`。
+- **上下文长度管理**：正文默认最多送 24000 字符，世界观/人物/角色/预设每块最多 8000 字符，超出自动截断，防止超长 TXT 一次性烧掉大量 token。
+- **对话体更省 token**：对话体使用更短 system prompt、精简文风分析，默认输出预算也降到 8192，避免模型长篇大论。
+- **工具描述精简**：`dsh_sequel_continue` 的参数描述已压缩，减少每轮工具 schema 占用的 token。
+- **工具描述标注“可选”**：避免 Agent 为了导入而额外多跑一轮工具调用。
+- **`insert_after` 截断**：只把插入点之前的正文送入模型，减少冗余历史。
+- **输出清理**：自动去掉模型输出的 ``` 代码围栏和“好的/以下是对话”等前缀废话。
+
+上下文截断可通过配置调整：
+
+```json
+{
+  "maxStoryChars": 30000,
+  "maxSettingChars": 10000
+}
+```
 
 Token 上限：
 
-- 默认最低输出预算：**16384 tokens**
+- 普通叙述默认最低输出预算：**16384 tokens**
+- 对话体默认最低输出预算：**8192 tokens**
 - 最高允许：**65536 tokens**
 - 单次调用可用 `max_tokens` 直接指定，例如 `max_tokens: 32768`
 - 也可以在插件配置里用 `maxTokens` 统一调高
@@ -178,7 +191,9 @@ Token 上限：
   "maxTokens": 32768,
   "temperature": 0.9,
   "defaultInstruction": "请严格模仿原文文风自然续写，保持人称、语气和叙事连贯。",
-  "presetPath": "G:\\ds专用\\dsh-sequel\\preset.example.json"
+  "presetPath": "G:\\ds专用\\dsh-sequel\\preset.example.json",
+  "maxStoryChars": 30000,
+  "maxSettingChars": 10000
 }
 ```
 

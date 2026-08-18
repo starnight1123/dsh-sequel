@@ -58,6 +58,10 @@ export interface Config {
   defaultInstruction?: string
   /** 默认风格预设 JSON 文件路径；未传 preset/preset_path 时自动加载。 */
   presetPath?: string
+  /** 正文最多送入模型的字符数（默认 24000），超出从尾部截断以节省 token。 */
+  maxStoryChars?: number
+  /** 世界观/人物/角色/预设每个区块最多字符数（默认 8000），超出从头部截断。 */
+  maxSettingChars?: number
 }
 
 export const Config = z.object({
@@ -67,6 +71,8 @@ export const Config = z.object({
   temperature: z.number().min(0).max(2),
   defaultInstruction: z.string().default('请严格模仿原文文风自然续写，保持人称、语气和叙事连贯。'),
   presetPath: z.string(),
+  maxStoryChars: z.number().min(1000).max(200000),
+  maxSettingChars: z.number().min(500).max(100000),
 })
 
 interface ImportTxtArgs {
@@ -204,23 +210,23 @@ export function apply(ctx: Context, config: Config): void {
     name: 'dsh_sequel_continue',
     description: '根据正文/世界观/人物与 JSON 角色预设生成续写，支持普通叙述与对话体。',
     parameters: {
-      mode: { type: 'string', enum: ['prose', 'dialogue'], description: '输出模式：prose=普通叙述（默认），dialogue=对话体/聊天体。' },
-      story: { type: 'string', description: '已有正文/最近剧情（TXT 内容），与 story_path 二选一；对话体可省略。' },
-      story_path: { type: 'string', description: 'TXT 文件路径，插件会直接读取该文件作为正文；与 story 二选一。' },
-      worldview: { type: 'string', description: '世界观/背景设定文本，可省略。' },
-      worldview_path: { type: 'string', description: '世界观 TXT 文件路径；与 worldview 二选一。' },
-      characters: { type: 'string', description: '人物信息文本，可省略。' },
-      characters_path: { type: 'string', description: '人物信息 TXT 文件路径；与 characters 二选一。' },
-      role: { type: 'string', description: 'JSON 角色卡字符串，可省略。' },
-      preset: { type: 'string', description: 'JSON 预设/风格字符串，可省略。' },
-      preset_path: { type: 'string', description: 'JSON 预设文件路径，插件会读取该文件作为预设；与 preset 二选一。' },
-      instruction: { type: 'string', description: '额外的续写要求。' },
-      length: { type: 'integer', description: '期望续写长度（字符数），默认 500。' },
-      insert_after: { type: 'string', description: '插入点：正文中出现的片段/句子，从此处之后开始续写。' },
-      style_hint: { type: 'string', description: '可选：额外指定文风要求，覆盖自动文风分析。' },
-      max_tokens: { type: 'integer', description: '可选：本次续写的最大输出 token 数，最高 65536。' },
-      provider: { type: 'string', description: '可选 provider 覆盖。' },
-      model: { type: 'string', description: '可选 model 覆盖。' },
+      mode: { type: 'string', enum: ['prose', 'dialogue'], description: 'prose/dialogue' },
+      story: { type: 'string', description: '已有正文；与 story_path 二选一，对话体可省。' },
+      story_path: { type: 'string', description: '正文 TXT 路径；与 story 二选一。' },
+      worldview: { type: 'string', description: '世界观设定。' },
+      worldview_path: { type: 'string', description: '世界观 TXT 路径。' },
+      characters: { type: 'string', description: '人物信息。' },
+      characters_path: { type: 'string', description: '人物信息 TXT 路径。' },
+      role: { type: 'string', description: 'JSON 角色卡。' },
+      preset: { type: 'string', description: 'JSON 预设。' },
+      preset_path: { type: 'string', description: '预设 JSON 路径。' },
+      instruction: { type: 'string', description: '续写要求。' },
+      length: { type: 'integer', description: '目标字符数，默认 500。' },
+      insert_after: { type: 'string', description: '插入点原文片段。' },
+      style_hint: { type: 'string', description: '文风要求。' },
+      max_tokens: { type: 'integer', description: '最大输出 token。' },
+      provider: { type: 'string', description: '覆盖 provider。' },
+      model: { type: 'string', description: '覆盖 model。' },
     },
     output: {
       schema: {
@@ -251,7 +257,6 @@ export function apply(ctx: Context, config: Config): void {
       },
     },
     async execute(args: ContinueArgs, exec: ToolRunContext) {
-      const mode = normalizeMode(args.mode)
       let story = ''
       if (args.story_path && args.story_path.trim().length > 0) {
         if (args.story && args.story.trim().length > 0) {
@@ -261,6 +266,7 @@ export function apply(ctx: Context, config: Config): void {
       } else {
         story = args.story ?? ''
       }
+      const mode = resolveMode(args.mode, story)
       if (mode === 'prose' && (!story || story.trim().length === 0)) {
         throw new Error('prose 模式需要 story 或 story_path')
       }
@@ -291,13 +297,22 @@ export function apply(ctx: Context, config: Config): void {
       } else if (preset.trim().length === 0 && config.presetPath && config.presetPath.trim().length > 0) {
         preset = await readTextFile(ctx, config.presetPath.trim(), exec.signal)
       }
+      // 上下文长度管理：防止超长 TXT 一次性烧掉大量 token。
+      const maxStory = config.maxStoryChars ?? 24000
+      const maxSetting = config.maxSettingChars ?? 8000
+      story = limitText(story, maxStory, 'tail')
+      worldview = limitText(worldview, maxSetting, 'head')
+      characters = limitText(characters, maxSetting, 'head')
+      const role = limitText(args.role ?? '', maxSetting, 'head')
+      preset = limitText(preset, maxSetting, 'head')
+
       const route = resolveRoute(args, config, exec)
       const length = args.length && args.length > 0 ? Math.floor(args.length) : 500
-      const maxTokens = resolveMaxTokens(args, config, route, length)
+      const maxTokens = resolveMaxTokens(args, config, route, length, mode)
       const temperature = route.temperature ?? config.temperature ?? 0.9
       const style = analyzeStyle(story)
       const insertion = story ? resolveInsertion(story, args.insert_after) : undefined
-      const promptArgs = { ...args, story, worldview, characters, preset, mode }
+      const promptArgs = { ...args, story, worldview, characters, preset, role, mode }
       const prompt = buildContinuationPrompt(promptArgs, config, length, style, insertion)
       const system = mode === 'dialogue' ? DIALOGUE_SYSTEM_PROMPT : CONTINUE_SYSTEM_PROMPT
       const messages: Message[] = [
@@ -331,8 +346,9 @@ export function apply(ctx: Context, config: Config): void {
       if (continuation.length === 0) {
         throw new Error('模型没有生成续写文本')
       }
+      const finalContinuation = cleanOutput(continuation, mode)
       return {
-        continuation,
+        continuation: finalContinuation,
         provider: options.provider,
         model: options.model,
         ...(assembler.usage === undefined ? {} : { usage: assembler.usage }),
@@ -373,14 +389,16 @@ function resolveRoute(
   throw new Error('未找到可用 LLM 路由：请在插件配置中设置 provider/model，或在调用参数中传入 provider/model')
 }
 
-/** 解析续写输出 token 上限：max_tokens > config.maxTokens > 路由/默认高预算。 */
+/** 解析续写输出 token 上限：max_tokens > config.maxTokens > 路由/模式默认预算。 */
 function resolveMaxTokens(
   args: ContinueArgs,
   config: Config,
   route: ResolvedRoute,
   length: number,
+  mode: ContinueMode,
 ): number {
-  const lengthBased = Math.min(MAX_TOKEN_CAP, Math.max(DEFAULT_MAX_TOKENS, Math.ceil(length * 2)))
+  const defaultBudget = mode === 'dialogue' ? 8192 : DEFAULT_MAX_TOKENS
+  const lengthBased = Math.min(MAX_TOKEN_CAP, Math.max(defaultBudget, Math.ceil(length * 1.5)))
   if (args.max_tokens && args.max_tokens > 0) {
     return Math.min(args.max_tokens, MAX_TOKEN_CAP)
   }
@@ -405,18 +423,38 @@ interface InsertionPoint {
   prefix: string
 }
 
-/** 规范化输出模式，支持中英文别名。 */
-function normalizeMode(mode?: string): ContinueMode {
-  if (!mode || mode.trim().length === 0) return 'prose'
-  const value = mode.trim().toLowerCase()
-  if (value === 'prose' || value === 'narrative' || value === '文' || value === '叙述') return 'prose'
-  if (value === 'dialogue' || value === 'chat' || value === '对话' || value === '聊天') return 'dialogue'
-  throw new Error(`未知 mode：${mode}（支持 prose / dialogue）`)
+/** 解析输出模式：显式指定优先，未指定时根据正文是否像对话自动判断。 */
+function resolveMode(mode: string | undefined, story: string): ContinueMode {
+  if (mode && mode.trim().length > 0) {
+    const value = mode.trim().toLowerCase()
+    if (value === 'prose' || value === 'narrative' || value === '文' || value === '叙述') return 'prose'
+    if (value === 'dialogue' || value === 'chat' || value === '对话' || value === '聊天') return 'dialogue'
+    throw new Error(`未知 mode：${mode}（支持 prose / dialogue）`)
+  }
+  return looksLikeDialogue(story) ? 'dialogue' : 'prose'
+}
+
+/** 粗略判断正文是否为对话体：存在多行“角色名：台词”结构。 */
+function looksLikeDialogue(text: string): boolean {
+  if (!text || text.trim().length === 0) return false
+  const lines = text.split('\n').map(line => line.trim()).filter(Boolean)
+  if (lines.length < 2) return false
+  const dialogueLines = lines.filter(line => /^[^：:]{1,20}[:：]/.test(line))
+  return dialogueLines.length >= Math.min(2, lines.length)
+}
+
+/** 截断文本以控制输入 token；keep=tail 保留结尾（最近剧情），head 保留开头（设定）。 */
+function limitText(text: string, maxChars: number, keep: 'head' | 'tail'): string {
+  if (!text || text.length <= maxChars) return text
+  if (keep === 'tail') {
+    return '…（前文过长已截断）\n' + text.slice(-maxChars)
+  }
+  return text.slice(0, maxChars) + '\n…（后文过长已截断）'
 }
 
 /** 组装续写提示词。 */
 function buildContinuationPrompt(
-  args: ContinueArgs & { story: string; mode: ContinueMode; worldview: string; characters: string; preset: string },
+  args: ContinueArgs & { story: string; mode: ContinueMode; worldview: string; characters: string; preset: string; role: string },
   config: Config,
   length: number,
   style: StyleProfile,
@@ -601,6 +639,20 @@ function analyzeStyle(text: string): StyleProfile {
   if (pov === '第一人称') notes.push('保持“我”视角')
   if (pov === '第三人称') notes.push('保持第三人称视角')
   return { language, era, pov, sentenceLength, tone, notes }
+}
+
+/** 清理模型输出：去掉代码围栏和对话体常见的前缀废话。 */
+function cleanOutput(text: string, mode: ContinueMode): string {
+  let cleaned = text.trim()
+  if (cleaned.startsWith('```')) {
+    cleaned = cleaned.replace(/^```[^\n]*\n?/, '').replace(/\n?```$/, '').trim()
+  }
+  if (mode === 'dialogue') {
+    cleaned = cleaned
+      .replace(/^(好的|以下是对话|对话如下|开始对话|好的，以下是对话)[:：]?\s*\n*/i, '')
+      .trim()
+  }
+  return cleaned
 }
 
 /** 简单识别 JSON 是角色卡还是预设。 */
