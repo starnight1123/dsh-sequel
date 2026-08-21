@@ -4,7 +4,7 @@ $ErrorActionPreference = 'Stop'
 
 $Port = 3080
 $Url = "http://127.0.0.1:$Port"
-$DshDir = 'C:\Users\admin\deepseek-harness'
+$LauncherCmd = 'G:\ds专用\dsh-sequel\scripts\Start-DSH-web.cmd'
 $LogFile = Join-Path $env:USERPROFILE 'dsh-web.log'
 
 function Test-DshPort {
@@ -26,8 +26,11 @@ function Test-DshPort {
 
 if (-not (Test-DshPort -PortNumber $Port)) {
   Write-Host 'DSH 未运行，正在启动...' -ForegroundColor Cyan
-  $cmdArgs = "/c cd /d `"$DshDir`" && pnpm dsh web >> `"$LogFile`" 2>&1"
-  Start-Process -FilePath 'cmd.exe' -ArgumentList $cmdArgs -WindowStyle Minimized
+  if (-not (Test-Path $LauncherCmd)) {
+    Write-Host "找不到启动器：$LauncherCmd" -ForegroundColor Red
+    exit 1
+  }
+  Start-Process -FilePath $LauncherCmd -WindowStyle Minimized
 
   $deadline = (Get-Date).AddSeconds(60)
   while ((Get-Date) -lt $deadline) {
